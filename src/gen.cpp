@@ -3,6 +3,8 @@
 #include <TRandom3.h>
 #include <TF1.h>
 #include <fstream>
+#include <string>
+#include <tuple>
 
 #include "const.h"
 #include "gen.h"
@@ -19,6 +21,58 @@ const double C_Feq = (pow(0.5/M_PI/hbarC,3)) ;
 // #  on freezeout hypersurface (May'2012)                  #
 // #  also, pre-BOOSTED dsigma is used                      #
 // ##########################################################
+
+
+
+
+
+
+
+
+  // get eta values from vhlle_config for 3D restoration
+  std::tuple<int, double, double> eta_values_from_vhlle_config(){
+  float value ;
+  int nz ;
+  float etamin ;
+  float etamax ;
+
+  std::string vhlle_key ;
+  std::string line ;
+  std::string PATH_VHLLE_CONFIG = "../configs/vhlle_hydro" ;
+
+  std::ifstream vhlleConfig ;
+  vhlleConfig.open(PATH_VHLLE_CONFIG) ;
+
+  while (vhlleConfig.good()){
+
+    getline(vhlleConfig, line) ;
+    std::stringstream input_line(line) ;
+
+    if (!line.empty()){
+      input_line >> vhlle_key >> value ;
+
+      if (vhlle_key == "nz"){
+        nz = value ;
+      }
+      else if (vhlle_key == "etamin") {
+        etamin = value ;
+      }
+      else if (vhlle_key == "etamax") {
+        etamax = value ;
+      }
+      else {
+        continue ;
+      }
+    }
+  }
+
+  return {nz, etamin, etamax} ;
+}
+
+
+
+
+
 
 
 // active Lorentz boost
@@ -206,6 +260,36 @@ double ffthermal(double *x, double *par)
 
 int generate()
 {
+ // This defines the parameters for restoring the eta coordinate.
+ // Should go into the config file once it works.
+
+ auto [n_eta, etamin, etamax] = eta_values_from_vhlle_config() ;
+ const double delta_eta = (etamax - etamin)/(n_eta - 1) ;
+ const double eta_min = -0.8 ;  //Before -0.2 to 0.2
+ const double eta_max = 0.8 ;
+ const double small_value = 0.0000001 ;
+ const int num_eta_slices = std::ceil((eta_max-eta_min)/delta_eta) ;
+ double eta_coordinates[num_eta_slices] ;
+ 
+
+
+ std::cout << "#######################################\n" ;
+ std::cout << "###### 3D Restoration Parameters ######\n" ;
+ std::cout << "#######################################\n" ;
+
+ std::cout << "Delta Eta:" << delta_eta << std::endl;
+ std::cout << "eta min" << eta_min << std::endl;
+ std::cout << "eta max:" << eta_max << std::endl;
+ std::cout << "No. of eta slices:" << num_eta_slices << std::endl;
+ std::cout << std::endl;
+
+ for(int i=0; i<num_eta_slices; i++) {
+        eta_coordinates[i] = eta_min + i*(delta_eta + small_value) - (num_eta_slices-1)*small_value/2 ;
+        std::cout << "Eta coordinate of slice " << i << ": " << eta_coordinates[i] << std::endl;
+        }
+
+ std::cout << "List of eta coordinates" << eta_coordinates << std::endl;
+ 
  const double gmumu [4] = {1., -1., -1., -1.} ;
  TF1 *fthermal = new TF1("fthermal",ffthermal,0.0,10.0,4) ;
  TLorentzVector mom ;
@@ -217,6 +301,7 @@ int generate()
  // Sigma meson needs to be excluded to generate correct multiplicities
  std::vector<smash::PdgCode> species_to_exclude{0x11, -0x11, 0x13, -0x13,
                                                 0x15, -0x15, 0x22, 0x9000221};
+
 
  for(int iel=0; iel<Nelem; iel++){ // loop over all elements
   // ---> thermal densities, for each surface element
@@ -243,7 +328,7 @@ int generate()
       for(int i=1; i<11; i++)
       density += (2.*J+1.)*pow(gevtofm,3)/(2.*pow(TMath::Pi(),2))*mass*mass*surf[iel].T*pow(stat,i+1)*TMath::BesselK(2,i*mass/surf[iel].T)*exp(i*muf/surf[iel].T)/i ;
     }
-    if(ip>0) cumulantDensity[ip] = cumulantDensity[ip-1] + density ;
+    if(ip>0) cumulantDensity[ip] = (cumulantDensity[ip-1] + density) ;
         else cumulantDensity[ip] = density ;
     totalDensity += density ;
 
@@ -253,10 +338,16 @@ int generate()
    if(totalDensity<0.  || totalDensity>100.){ ntherm_fail++ ; continue ; }
    //cout<<"thermal densities calculated.\n" ;
    //cout<<cumulantDensity[NPART-1]<<" = "<<totalDensity<<endl ;
- // ---< end thermal densities calc
+   // ---< end thermal densities calc
   double rval, dvEff = 0., W ;
-  // dvEff = dsigma_mu * u^mu
+  // dvEff = dsigma_mu * u^mu. In the fluid rest frame u^mu=(1,0,0,0)
   dvEff = surf[iel].dsigma[0] ;
+
+
+  // Loop over all eta slices 
+  for(int islice=0; islice<num_eta_slices; islice++){
+
+
   for(int ievent=0; ievent<params::NEVENTS; ievent++){
   // ---- number of particles to generate
   int nToGen = 0 ;
@@ -268,6 +359,11 @@ int generate()
    // SMASH random number according to Poisson DF
     nToGen = rnd->Poisson(dvEff*totalDensity) ;
   }
+
+
+
+
+
    // ---- we generate a particle!
    for(int ipart=0; ipart<nToGen; ipart++){
 
@@ -311,25 +407,25 @@ int generate()
    }while(rval>W) ; // end fast momentum generation
    if(niter>nmaxiter) nmaxiter = niter ;
    // additional random smearing over eta
+   const double etaSlice = eta_coordinates[islice] ;
    const double etaF = 0.5*log((surf[iel].u[0]+surf[iel].u[3])/(surf[iel].u[0]-surf[iel].u[3])) ;
-   const double etaShift = params::deta*(-0.5+rnd->Rndm()) ;
-   const double vx = surf[iel].u[1]/surf[iel].u[0]*cosh(etaF)/cosh(etaF+etaShift) ;
-   const double vy = surf[iel].u[2]/surf[iel].u[0]*cosh(etaF)/cosh(etaF+etaShift) ;
-   const double vz = tanh(etaF+etaShift) ;
+   const double etaShift = 0.0 ;  //params::deta*(-0.5+rnd->Rndm()) ;
+   const double vx = surf[iel].u[1]/surf[iel].u[0]*cosh(etaF)/cosh(etaF+etaShift+etaSlice) ;
+   const double vy = surf[iel].u[2]/surf[iel].u[0]*cosh(etaF)/cosh(etaF+etaShift+etaSlice) ;
+   const double vz = tanh(etaF+etaShift+etaSlice) ;
    mom.Boost(vx,vy,vz) ;
    smash::FourVector momentum(mom.E(), mom.Px(), mom.Py(), mom.Pz());
-   smash::FourVector position(surf[iel].tau*cosh(surf[iel].eta+etaShift), surf[iel].x, surf[iel].y, surf[iel].tau*sinh(surf[iel].eta+etaShift));
+   smash::FourVector position(surf[iel].tau*cosh(surf[iel].eta+etaShift+etaSlice), surf[iel].x, surf[iel].y, surf[iel].tau*sinh(surf[iel].eta+etaShift+etaSlice));
    acceptParticle(ievent, &part, position, momentum) ;
   } // coordinate accepted
-  } // events loop
+  } // slice loop
   if(iel%(Nelem/50)==0) cout<<round(iel/(Nelem*0.01))<<" % done, maxiter= "<<nmaxiter<<endl ;
  } // loop over all elements
  cout << "therm_failed elements: " <<ntherm_fail << endl ;
  return npart[0] ;
  delete fthermal ;
+ }
 }
-
-
 
 void acceptParticle(int ievent, const smash::ParticleTypePtr &ldef, smash::FourVector position, smash::FourVector momentum)
 {
